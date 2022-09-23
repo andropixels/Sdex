@@ -22,6 +22,22 @@ mod tests;
 #[cfg(feature = "runtime-benchmarks")]
 mod benchmarking;
 
+pub const MINIMUM_LIQUIDITY: u128 = 1000; // 10**3;
+
+#[derive(Encode, Decode, Clone, Eq, PartialEq, RuntimeDebug, MaxEncodedLen, TypeInfo)]
+pub struct Pool<AccountId, FungibleTokenId> {
+	/// The owner of pool
+	pub owner: AccountId,
+	/// The id of first token
+	pub token_0: FungibleTokenId,
+	/// The id of second token
+	pub token_1: FungibleTokenId,
+	/// The id of liquidity pool token
+	pub lp_token: FungibleTokenId,
+}
+
+type PalletId =u32 ;
+type AccountId =u32 ;
 #[frame_support::pallet]
 pub mod pallet {
 	use codec::{Decode, Encode, MaxEncodedLen};
@@ -84,6 +100,11 @@ pub mod pallet {
 	#[pallet::getter(fn operational)]
 	pub(super) type Operational<T: Config> = StorageValue<_, bool, ValueQuery>;
 
+	#[pallet::storage]
+	pub(super) type Pools<T: Config> =
+		StorageMap<_, Blake2_128, T::PoolId, Pool<T::AccountId, T::FungibleTokenId>>;
+
+
 	/// Maximum Mintable tokens
 	#[pallet::storage]
 	#[pallet::getter(fn mintable_tokens)]
@@ -105,6 +126,10 @@ pub mod pallet {
 		BurnTxDetails<T::AccountId, T::MaxRelayers>,
 		ValueQuery,
 	>;
+
+	#[pallet::storage]
+	#[pallet::getter(fn next_pool_id)]
+	pub(super) type NextPoolId<T: Config> = StorageValue<_, T::PoolId, ValueQuery>;
 
 	// In FRAME v2.
 	#[pallet::genesis_config]
@@ -136,6 +161,7 @@ pub mod pallet {
 	#[pallet::event]
 	#[pallet::generate_deposit(pub (super) fn deposit_event)]
 	pub enum Event<T: Config> {
+		PoolCreated(PalletId,AccountId),
 		RelayerStatusUpdated(T::AccountId, bool),
 		NotOperational,
 		NativeSDEXMintedAndLocked(T::AccountId, T::AccountId, T::Balance),
@@ -172,6 +198,25 @@ pub mod pallet {
 	// Dispatchable functions must be annotated with a weight and must return a DispatchResult.
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
+
+		pub fn create_pool(
+			origin: OriginFor<T>,
+			token_a: u32,
+			token_b: u32,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			
+			ensure!(
+				!GetPool::<T>::contains_key((token_a, token_b)),
+				Error::<T>::PoolAlreadyCreated
+			);
+
+			Self::do_create_pool(&who, token_a, token_b)?;
+
+			Ok(())
+		}
+
 		#[pallet::weight(<T as Config>::WeightInfo::set_migration_operational_status())]
 		pub fn set_migration_operational_status(
 			origin: OriginFor<T>,
@@ -348,5 +393,65 @@ pub mod pallet {
 			}
 			return prev_locked_amount
 		}
+
+
+
+	pub fn do_create_pool(
+		who: &T::AccountId,
+		token_a: u32,
+		token_b: u32,
+	) -> Result<PoolId, DispatchError> {
+		let id = NextPoolId::<T>::try_mutate(|id| -> Result<T::PoolId, DispatchError> {
+			let current_id = *id;
+			*id = id.checked_add(&One::one()).ok_or(Error::<T>::NoAvailablePoolId)?;
+			Ok(current_id)
+		})?;
+
+		let deposit = T::CreatePoolDeposit::get();
+		<T as Config>::Currency::transfer(who, &Self::account_id(), deposit, AllowDeath)?;
+
+		let lp_token = Self::generate_random_token_id(id);
+		let name: Vec<u8> = "LP Token".as_bytes().to_vec();
+		let symbol: Vec<u8> = "LPV1".as_bytes().to_vec();
+
+		pallet_token_fungible::Pallet::<T>::do_create_token(
+			&Self::account_id(),
+			lp_token,
+			name,
+			symbol,
+			18,
+		)?;
+
+		let (token_0, token_1) = Self::sort_tokens(token_a, token_b);
+
+		let pool = Pool { owner: who.clone(), token_0, token_1, lp_token };
+
+		Pools::<T>::insert(id, pool);
+		GetPool::<T>::insert((token_a, token_b), id);
+
+		Self::deposit_event(Event::PoolCreated(id, who.clone()));
+
+		Ok(id)
+	}
+
+	fn generate_random_token_id(seed: T::PoolId) -> FungibleTokenId {
+		let (random_seed, _) = T::Randomness::random(&(Self::account_id(), seed).encode());
+		let random_id = <FungibleTokenId>::decode(&mut random_seed.as_ref())
+			.expect("Failed to decode random seed");
+		random_id
+	}
+
+	fn sort_tokens(
+		token_a: T::FungibleTokenId,
+		token_b: T::FungibleTokenId,
+	) -> (T::FungibleTokenId, T::FungibleTokenId) {
+		if token_a < token_b {
+			(token_a, token_b)
+		} else {
+			(token_b, token_a)
+		}
+	}
+
+
 	}
 }
