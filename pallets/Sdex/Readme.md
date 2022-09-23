@@ -1,4 +1,4 @@
-#Substrate Dex Pallet
+# Substrate Dex Pallet
  ## features
   ### MintToken
   ### CreatePool
